@@ -1,0 +1,186 @@
+# openwebui-on-azure-paas
+
+> Open WebUI on a fully PaaS Azure stack (Container Apps + PostgreSQL + Blob + Azure OpenAI over Private Link) with Bicep and Azure Verified Modules
+
+**[日本語版はこちら / Japanese](README-ja.md)**
+
+A Bicep sample that runs [Open WebUI](https://openwebui.com) on Azure PaaS services only, built **entirely from [Azure Verified Modules (AVM)](https://azure.github.io/Azure-Verified-Modules/)**.
+It is meant for verification: create it, try it, and delete the whole resource group afterwards. It is not a production design.
+
+Open WebUI also has an official guide for Azure Container Apps: <https://docs.openwebui.com/deployment/azure-container-apps>.
+This repository is a personal write-up of building that kind of stack with AVM and Bicep.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  user[Browser] -->|HTTPS| ca[Container Apps<br/>Open WebUI, 1 replica]
+  subgraph vnet[VNet]
+    ca --> pg[(PostgreSQL<br/>B1ms / pgvector)]
+    ca -->|Private Endpoint| blob[Blob Storage]
+    ca -->|Private Endpoint| aoai[Azure OpenAI<br/>gpt-5-mini]
+  end
+```
+
+| Role | Service | AVM module |
+|---|---|---|
+| App (Open WebUI) | Container Apps (Consumption, 1 replica) | `app/container-app`, `app/managed-environment` |
+| Database and vector search | Azure Database for PostgreSQL flexible server (B1ms, VNet integration, `pgvector`) | `db-for-postgre-sql/flexible-server` |
+| Uploaded files | Blob Storage (private endpoint only) | `storage/storage-account` |
+| LLM | Azure OpenAI (`gpt-5-mini`, private endpoint only) | `cognitive-services/account` |
+| Network | VNet (3 subnets), 3 private DNS zones | `network/virtual-network`, `network/private-dns-zone` |
+| Logs | Log Analytics | `operational-insights/workspace` |
+
+- Open WebUI uses SQLite by default. Putting SQLite on a network share such as Azure Files causes locking problems, so the database is moved to PostgreSQL. See the [official troubleshooting page](https://docs.openwebui.com/troubleshooting/multi-replica).
+- The sample runs a single replica (min 1, max 1). For more replicas you need Redis (WebSocket) and a review of the number of DB connections.
+- Blob Storage uses the storage account key, because Open WebUI does not document managed identity support for Blob Storage.
+- Azure OpenAI is accessed with an API key (`disableLocalAuth: false`).
+- The Azure OpenAI connection is passed with `OPENAI_API_BASE_URLS`, `OPENAI_API_KEYS`, and `OPENAI_API_CONFIGS`. `model_ids` in `OPENAI_API_CONFIGS` restricts the model list to the deployed model (otherwise every model that Azure OpenAI returns is listed, 223 in my case).
+
+## Repository structure
+
+```
+openwebui-on-azure-paas/
+├── main.bicep        # Bicep template (AVM modules only)
+├── main.bicepparam   # Parameter file (edit before deploying)
+└── deploy.sh         # Helper script (what-if by default)
+```
+
+## Prerequisites
+
+- Azure CLI (`az`) installed and logged in
+- `jq` and `openssl` (used by `deploy.sh`)
+- Resource providers registered in the subscription: `Microsoft.App`, `Microsoft.DBforPostgreSQL`, `Microsoft.OperationalInsights`, `Microsoft.Storage`, `Microsoft.Network`, `Microsoft.CognitiveServices`
+- Quota for the model in your region (this sample uses `gpt-5-mini` with the `GlobalStandard` SKU)
+
+## Deploy
+
+`deploy.sh` generates the Open WebUI secret key on every run (it is not stored anywhere).
+The PostgreSQL administrator name and password can be passed as arguments.
+
+```bash
+./deploy.sh -s "<subscription>"                                    # what-if only; admin is owuiadmin, password derived from uniqueString
+./deploy.sh -s "<subscription>" -u <admin-name> -p <password>      # specify the administrator
+./deploy.sh -s "<subscription>" --apply                            # deploy
+```
+
+- If you omit the password, `main.bicep` derives it from `uniqueString` (`Pg1` plus 26 alphanumeric characters). **`uniqueString` is deterministic (it depends on the subscription and resource group IDs) and is not random.** This is acceptable here because PostgreSQL has public access disabled and the sample is for verification. For anything else, pass `-p`.
+- The password is embedded in a URL, so use alphanumeric characters only (include upper case, lower case, and digits).
+- You can also pass `PG_ADMIN_LOGIN` and `PG_ADMIN_PASSWORD` as environment variables.
+- After deployment, read the connection string from the Container App secret:
+
+```bash
+az containerapp secret show -g rg-owui-paas -n ca-owui --secret-name database-url --subscription "<subscription>" --query value -o tsv
+```
+
+When you are done, delete the resource group:
+
+```bash
+az group delete -n rg-owui-paas --subscription "<subscription>" --yes
+```
+
+### Redeploying
+
+`deploy.sh` generates a new `WEBUI_SECRET_KEY` unless the variable is set. A new key invalidates existing logins.
+To keep the key, read the current secret and export it before redeploying:
+
+```bash
+export WEBUI_SECRET_KEY="$(az containerapp secret show -g rg-owui-paas -n ca-owui --secret-name webui-secret-key --subscription "<subscription>" --query value -o tsv)"
+```
+
+## Cost estimate
+
+Japan East, 730 hours per month, converted to JPY from the Azure Retail Prices API (retrieved on 2026-10-11). **These are estimates; the actual bill has not been verified.**
+
+| Item | Unit price | Monthly (approx.) |
+|---|---|---|
+| Container Apps (1 vCPU / 2 GiB, always 1 replica) | see below | about 3,700 JPY when idle, about 11,800 JPY when active |
+| PostgreSQL B1ms (compute) | about 4.1 JPY/hour | about 3,000 JPY |
+| PostgreSQL storage, 32 GB | about 21.7 JPY/GB | about 700 JPY |
+| Private endpoints x 2 (Azure OpenAI, Blob) | about 1.58 JPY/hour each | about 2,300 JPY |
+| Private DNS zones x 3 | about 79 JPY/month each | about 240 JPY |
+| **Total** | | **about 9,900 to 18,000 JPY (about 330 to 600 JPY per day)** |
+
+Container Apps (Consumption) unit prices:
+
+| Meter | Unit price |
+|---|---|
+| vCPU (active) | about 0.0038 JPY/second |
+| vCPU (idle) | about 0.0005 JPY/second |
+| Memory | about 0.0005 JPY/GiB-second |
+| Free grant (per subscription, per month) | 180,000 vCPU-seconds, 360,000 GiB-seconds |
+
+- The idle rate applies only when the replica is not processing requests, uses less than 0.01 vCPU, and receives less than 1,000 bytes per second. Whether Open WebUI is actually treated as idle needs to be measured.
+- Not included: Azure OpenAI token charges, Log Analytics (5 GB per month free; the daily cap is set to 1 GB), data transfer, and Blob capacity.
+- The environment management meter (`Environment Management`) applies when you use a Dedicated profile, a private endpoint on the environment itself, or planned maintenance. This sample uses none of them, so it should not apply (to be confirmed).
+
+## Tuning for the idle rate
+
+Even with a minimum of one replica, the idle rate (about 1/7 of the active rate) applies only when the replica meets all of these conditions:
+
+- It is not processing requests
+- CPU usage is below 0.01 vCPU
+- Network receive is below 1,000 bytes per second
+
+Out of the box, Open WebUI received about 1,320 bytes per second even when nobody used it, so it did not qualify (measured with `RxBytes` in Azure Monitor).
+The startup log shows `Scheduler worker started (timer poll interval: 1s, ...)`, so I suspected the scheduler's background work and set these environment variables:
+
+| Environment variable | Value | Meaning |
+|---|---|---|
+| `ENABLE_AUTOMATIONS` | `false` | Stop automation processing |
+| `TIMER_POLL_INTERVAL` | `60` | Check timers every 60 seconds instead of every second |
+
+Average over 10 minutes with no access (1 replica, 1 vCPU / 2 GiB):
+
+| Metric | Before | After |
+|---|---|---|
+| CPU | about 0.0057 vCPU | about 0.0017 vCPU |
+| Network receive | about 1,320 bytes/s | about 307 bytes/s |
+
+- On the metrics, all three conditions are met. Whether the replica is actually billed at the idle rate has to be confirmed in Cost Management (`Standard vCPU Idle Usage` versus `Active Usage`). That is not confirmed yet.
+- I did not separate which of the two variables made the difference.
+- These are `ConfigVar` settings, so to apply them after the first start, deploy once with `--reset-config`.
+
+## Environment variables only apply on the first start
+
+Most Open WebUI settings are `ConfigVar`s: **they are read from environment variables only on the first start, and the values stored in the database take precedence afterwards** (changes made in the admin UI are stored in the database as well).
+Changing the environment variables in Bicep and redeploying therefore has no effect on an environment that has already started.
+To apply the change, either edit the setting in the admin UI, or start once with `RESET_CONFIG_ON_START=true` (this resets the database settings to the environment variable values). Remove it afterwards, because it resets the settings on every start.
+
+```bash
+./deploy.sh -s "<subscription>" --reset-config --apply   # apply the environment variables once
+./deploy.sh -s "<subscription>" --apply                  # then redeploy without the flag
+```
+
+## Verified (2026-10-11)
+
+Confirmed with the application logs and by using the app:
+
+- Chat works from Open WebUI to Azure OpenAI through the OpenAI-compatible endpoint (`/openai/v1`) with an API key (Azure OpenAI has public access disabled, private endpoint only).
+- Names resolve through the private endpoints from Container Apps (uploads to Blob succeed with public access disabled).
+- Blob upload and download work (3 uploads: `PUT` returned 201, `GET` returned 206).
+- `pgvector` works (the log shows `Inserted 7 items into collection ...` and the search result `query_doc:result`; the extension could be created with only the `azure.extensions` allow list).
+- The migration on the first start finished without problems with one replica, and `/health/db` returns 200.
+- `model_ids` in `OPENAI_API_CONFIGS` restricts the list to `gpt-5-mini` (after using `--reset-config` once).
+
+Things I noticed:
+
+- Adding an image (a PNG screenshot) to a knowledge base fails with `Error processing file`, because no text can be extracted. Saving the file to Blob still succeeds.
+- Embeddings use the model bundled in the container (`all-MiniLM-L6-v2`). Its cache is on the container's local storage, so it is downloaded again on every restart.
+- In Azure Monitor, `Transactions` (`PutBlob`) showed fewer calls than the log, and `BlobCount` lags by an hour. The application log was more reliable for verification.
+
+## Not verified
+
+- Whether the actual bill uses the idle rate (`Standard vCPU Idle Usage` versus `Active Usage` in Cost Management).
+- Whether the `Standard_B1ms` connection limit (35 for users) is enough for several users (only one user was tested).
+- PDF processing (text extraction, OCR), large files, and using an Azure OpenAI embedding model.
+
+## Out of scope
+
+- Multiple replicas (needs Redis and a review of DB connections; the sample runs one replica).
+- Inspecting the PostgreSQL tables directly (the `pgvector` insert and search logs were enough).
+- Custom domains and free managed certificates for Container Apps (the default `*.azurecontainerapps.io` domain was used). See the official documentation: <https://learn.microsoft.com/azure/container-apps/custom-domains-managed-certificates>
+
+## License
+
+[MIT](LICENSE)

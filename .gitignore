@@ -1,0 +1,9 @@
+# Never commit secrets or keys
+*.pfx
+*.pem
+*.key
+.env
+*.env
+
+# Compiled Bicep output
+main.json
