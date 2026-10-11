@@ -5,7 +5,7 @@
 **[日本語版はこちら / Japanese](README-ja.md)**
 
 A Bicep sample that runs [Open WebUI](https://openwebui.com) on Azure PaaS services only, built **entirely from [Azure Verified Modules (AVM)](https://azure.github.io/Azure-Verified-Modules/)**.
-It is meant for verification: create it, try it, and delete the whole resource group afterwards. It is not a production design.
+It aims to be a minimal, relatively low-cost setup in which the data paths (Azure OpenAI, Blob, PostgreSQL) are closed with Private Link. See [Trade-offs](#trade-offs) for what it does not cover.
 
 Open WebUI also has an official guide for Azure Container Apps: <https://docs.openwebui.com/deployment/azure-container-apps>.
 This repository is a personal write-up of building that kind of stack with AVM and Bicep.
@@ -37,6 +37,17 @@ flowchart LR
 - Azure OpenAI is accessed with an API key (`disableLocalAuth: false`).
 - The Azure OpenAI connection is passed with `OPENAI_API_BASE_URLS`, `OPENAI_API_KEYS`, and `OPENAI_API_CONFIGS`. `model_ids` in `OPENAI_API_CONFIGS` restricts the model list to the deployed model (otherwise every model that Azure OpenAI returns is listed, 223 in my case).
 
+## Trade-offs
+
+The data paths are closed with Private Link: Azure OpenAI, Blob Storage, and PostgreSQL have public access disabled and are reachable only from inside the VNet (private endpoints and VNet integration). The only thing exposed to the internet is the Open WebUI ingress of Container Apps.
+
+What the sample does not do:
+
+- Secrets (the PostgreSQL password, the storage account key, and the Azure OpenAI API key) are stored as Container App secrets. Key Vault is not used.
+- The first user who registers in Open WebUI becomes the administrator. The URL is public, so create the administrator account right after the deployment.
+- The default PostgreSQL password is derived from `uniqueString`, which is guessable (see [Deploy](#deploy)). Pass your own with `-p` for anything closer to production.
+- There is no redundancy: one replica, PostgreSQL HA and geo-redundant backup disabled, and LRS storage. If it goes down, it stays down.
+
 ## Repository structure
 
 ```
@@ -64,7 +75,7 @@ The PostgreSQL administrator name and password can be passed as arguments.
 ./deploy.sh -s "<subscription>" --apply                            # deploy
 ```
 
-- If you omit the password, `main.bicep` derives it from `uniqueString` (`Pg1` plus 26 alphanumeric characters). **`uniqueString` is deterministic (it depends on the subscription and resource group IDs) and is not random.** This is acceptable here because PostgreSQL has public access disabled and the sample is for verification. For anything else, pass `-p`.
+- If you omit the password, `main.bicep` derives it from `uniqueString` (`Pg1` plus 26 alphanumeric characters). **`uniqueString` is deterministic (it depends on the subscription and resource group IDs) and is not random.** This is acceptable here because PostgreSQL has public access disabled and is reachable only from inside the VNet. For anything closer to production, pass `-p`.
 - The password is embedded in a URL, so use alphanumeric characters only (include upper case, lower case, and digits).
 - You can also pass `PG_ADMIN_LOGIN` and `PG_ADMIN_PASSWORD` as environment variables.
 - After deployment, read the connection string from the Container App secret:
@@ -137,7 +148,8 @@ Average over 10 minutes with no access (1 replica, 1 vCPU / 2 GiB):
 | CPU | about 0.0057 vCPU | about 0.0017 vCPU |
 | Network receive | about 1,320 bytes/s | about 307 bytes/s |
 
-- On the metrics, all three conditions are met. Whether the replica is actually billed at the idle rate has to be confirmed in Cost Management (`Standard vCPU Idle Usage` versus `Active Usage`). That is not confirmed yet.
+- On the metrics, all three conditions are met. Whether the replica is actually billed at the idle rate has to be confirmed in Cost Management (`Standard vCPU Idle Usage` versus `Active Usage`). That is still being verified.
+- Container Apps has a monthly free grant (180,000 vCPU-seconds and 360,000 GiB-seconds per subscription), and usage within the grant does not appear on the bill. The idle/active split can therefore only be seen after the grant is used up.
 - I did not separate which of the two variables made the difference.
 - These are `ConfigVar` settings, so to apply them after the first start, deploy once with `--reset-config`.
 
@@ -159,6 +171,7 @@ Confirmed with the application logs and by using the app:
 - Chat works from Open WebUI to Azure OpenAI through the OpenAI-compatible endpoint (`/openai/v1`) with an API key (Azure OpenAI has public access disabled, private endpoint only).
 - Names resolve through the private endpoints from Container Apps (uploads to Blob succeed with public access disabled).
 - Blob upload and download work (3 uploads: `PUT` returned 201, `GET` returned 206).
+- PDF text extraction works (a 239 KB PDF was added to a knowledge base and the chat answered with the source).
 - `pgvector` works (the log shows `Inserted 7 items into collection ...` and the search result `query_doc:result`; the extension could be created with only the `azure.extensions` allow list).
 - The migration on the first start finished without problems with one replica, and `/health/db` returns 200.
 - `model_ids` in `OPENAI_API_CONFIGS` restricts the list to `gpt-5-mini` (after using `--reset-config` once).
@@ -166,14 +179,14 @@ Confirmed with the application logs and by using the app:
 Things I noticed:
 
 - Adding an image (a PNG screenshot) to a knowledge base fails with `Error processing file`, because no text can be extracted. Saving the file to Blob still succeeds.
-- Embeddings use the model bundled in the container (`all-MiniLM-L6-v2`). Its cache is on the container's local storage, so it is downloaded again on every restart.
+- Embeddings use the model bundled in the container (`all-MiniLM-L6-v2`). The model files are on the container's local storage, so they are downloaded again on every restart. The embedding settings are `ConfigVar`s that can be changed in the admin UI, so an Azure OpenAI embedding model should be possible later (not tested).
 - In Azure Monitor, `Transactions` (`PutBlob`) showed fewer calls than the log, and `BlobCount` lags by an hour. The application log was more reliable for verification.
 
 ## Not verified
 
 - Whether the actual bill uses the idle rate (`Standard vCPU Idle Usage` versus `Active Usage` in Cost Management).
 - Whether the `Standard_B1ms` connection limit (35 for users) is enough for several users (only one user was tested).
-- PDF processing (text extraction, OCR), large files, and using an Azure OpenAI embedding model.
+- OCR (for example, PDFs that contain only images), large files, and using an Azure OpenAI embedding model.
 
 ## Out of scope
 

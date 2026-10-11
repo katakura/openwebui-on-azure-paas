@@ -5,7 +5,7 @@
 **[English README is here](README.md)**
 
 [Open WebUI](https://openwebui.com) を、Azure の PaaS だけで動かす Bicep サンプルです。**[Azure Verified Modules（AVM）](https://azure.github.io/Azure-Verified-Modules/)のモジュールだけ**で構成しています。
-永続的な運用ではなく、作って、検証して、リソースグループごと削除する使い方を想定した検証用です。
+低コストで立ち上げられる最小構成で、データの経路（Azure OpenAI、Blob、PostgreSQL）を Private Link で閉じています。割り切った点は、[割り切ったところ](#割り切ったところ)を参照してください。
 
 Open WebUI の公式にも、Azure Container Apps 向けのガイドがあります: <https://docs.openwebui.com/deployment/azure-container-apps>
 このリポジトリは、AVM と Bicep で、同じ趣旨の構成を組んでみた、個人の検証記録です。
@@ -38,6 +38,17 @@ flowchart LR
 - Azure OpenAI は、API キーで接続します（`disableLocalAuth: false`）。
 - Azure OpenAI の接続は、`OPENAI_API_BASE_URLS` / `OPENAI_API_KEYS` / `OPENAI_API_CONFIGS` で渡します。`OPENAI_API_CONFIGS` の `model_ids` で、デプロイ済みのモデルだけに絞ります（絞らないと、Azure OpenAI が返すモデルの一覧が、全部並びます）。
 
+## 割り切ったところ
+
+データの経路は、Private Link で閉じています。Azure OpenAI、Blob Storage、PostgreSQL は、公開アクセスを無効にして、VNet の中（Private Endpoint と VNet 統合）からだけ繋がります。インターネットに公開されるのは、Container Apps の Open WebUI の入り口だけです。
+
+このサンプルが、やっていないことです。
+
+- 認証情報（PostgreSQL のパスワード、ストレージキー、Azure OpenAI の API キー）は、Container App のシークレットに入れています。Key Vault は使っていません。
+- 最初に Open WebUI に登録した人が、管理者になります。URL が公開されるので、デプロイしたら、すぐに管理者アカウントを作ってください。
+- PostgreSQL のパスワードの既定値は、`uniqueString` から作ります。推測できる値なので（[デプロイ](#デプロイ)を参照）、本番に近い使い方では、`-p` で自分のパスワードを指定してください。
+- 冗長性はありません。レプリカは 1 つで、PostgreSQL の HA とジオ冗長バックアップは無効、ストレージは LRS です。落ちたら止まります。
+
 ## リポジトリの構成
 
 ```
@@ -65,7 +76,7 @@ PostgreSQL の管理者名とパスワードは、引数で渡せます。
 ./deploy.sh -s "<subscription>" --apply                          # デプロイ
 ```
 
-- パスワードを省略すると、`main.bicep` が `uniqueString` から作ります（`Pg1` + 英数字 26 文字）。**`uniqueString` は、サブスクリプションと RG の ID から決まる値で、ランダムではありません**（同じ入力なら、同じ値になります）。PostgreSQL は、公開アクセスを無効にした検証用なので、許容しています。それ以外の用途では、`-p` で指定してください。
+- パスワードを省略すると、`main.bicep` が `uniqueString` から作ります（`Pg1` + 英数字 26 文字）。**`uniqueString` は、サブスクリプションと RG の ID から決まる値で、ランダムではありません**（同じ入力なら、同じ値になります）。PostgreSQL は、公開アクセスを無効にして、VNet の中からしか繋がらないので、許容しています。本番に近い使い方では、`-p` で指定してください。
 - パスワードは、URL に埋め込むので、英数字だけにします（大文字、小文字、数字を含めてください）。
 - 環境変数（`PG_ADMIN_LOGIN`、`PG_ADMIN_PASSWORD`）でも渡せます。
 - デプロイ後の接続情報は、Container App のシークレットから取得できます。
@@ -138,7 +149,7 @@ Open WebUI をそのまま動かすと、誰も使っていなくても、受信
 | CPU | 約 0.0057 コア | 約 0.0017 コア |
 | 受信 | 約 1,320 バイト/秒 | 約 307 バイト/秒 |
 
-- メトリクスの上では、3 つの条件をすべて満たしました。実際にアイドル料金で課金されているかは、Cost Management のメーター（`Standard vCPU Idle Usage` と `Active Usage`）で確認する必要があります（未確認）。
+- メトリクスの上では、3 つの条件をすべて満たしました。実際にアイドル料金で課金されているかは、Cost Management のメーター（`Standard vCPU Idle Usage` と `Active Usage`）で確認する必要があります（検証中）。Container Apps には、毎月の無料枠（サブスクリプションごとに、180,000 vCPU 秒と 360,000 GiB 秒）があり、無料枠の範囲内の利用は、請求に表示されません。そのため、アイドルとアクティブの内訳は、無料枠を使い切ってから見えます。
 - 2 つの環境変数のどちらが、どれだけ効いたかは、切り分けていません。
 - これらは `ConfigVar` なので、初回起動のあとに反映するには、`--reset-config` で一度デプロイします。
 
@@ -159,6 +170,7 @@ Open WebUI の設定の多くは、`ConfigVar` という扱いで、**初回起�
 - Open WebUI から、Azure OpenAI の OpenAI 互換エンドポイント（`/openai/v1`）に、API キーで繋がり、チャットできる（Azure OpenAI は、公開アクセス無効で Private Endpoint のみ）。
 - Container Apps から、Private Endpoint 経由で、Blob と Azure OpenAI の名前が解決できる（Blob の公開アクセスを無効にしても、アップロードが成功する）。
 - Blob への保存と読み出しが動く（アップロード 3 回で、`PUT` が 201、`GET` が 206）。
+- PDF のテキスト抽出が動く（239KB の PDF をナレッジに追加して、ソース付きで回答できた）。
 - `pgvector` が動く（ログに `Inserted 7 items into collection ...` と、検索結果 `query_doc:result`。`azure.extensions` の許可リストだけで、拡張を作成できた）。
 - 初回起動のマイグレーションが、1 レプリカで問題なく終わり、`/health/db` が 200 を返す。
 - `OPENAI_API_CONFIGS` の `model_ids` で、一覧を `gpt-5-mini` だけに絞れる（`--reset-config` を一度使った場合）。
@@ -166,14 +178,14 @@ Open WebUI の設定の多くは、`ConfigVar` という扱いで、**初回起�
 気づいた点です。
 
 - 画像（PNG のスクリーンショット）をナレッジに追加すると、`Error processing file` になります（テキストを取り出せないため）。Blob への保存自体は成功します。
-- 埋め込みは、コンテナ内蔵のモデル（`all-MiniLM-L6-v2`）です。モデルのキャッシュは、コンテナ内のローカル領域なので、再起動のたびに取得し直されます。
+- 埋め込みは、コンテナ内蔵のモデル（`all-MiniLM-L6-v2`）です。モデルのファイルは、コンテナ内のローカル領域にあるので、再起動のたびに取得し直されます。埋め込みの設定は `ConfigVar` で、管理者画面から変えられるので、Azure OpenAI の埋め込みモデルは、あとから試せるはずです（未確認）。
 - Azure Monitor の `Transactions`（`PutBlob`）は、ログの回数より少なく表示され、`BlobCount` は 1 時間単位で遅れます。確認には、アプリのログのほうが正確でした。
 
 ## 未確認
 
 - 実請求がアイドル料金になっているか（Cost Management の `Standard vCPU Idle Usage` と `Active Usage`）。
 - `Standard_B1ms` の接続数の上限（ユーザー用 35）で、複数ユーザーでも足りるか（今回は 1 ユーザーのみ）。
-- PDF の処理（テキスト抽出、OCR）、大きなファイル、Azure OpenAI の埋め込みモデルを使う構成。
+- OCR（画像だけの PDF など）、大きなファイル、Azure OpenAI の埋め込みモデルを使う構成。
 
 ## 検証の対象外
 
