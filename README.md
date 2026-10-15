@@ -101,7 +101,7 @@ export WEBUI_SECRET_KEY="$(az containerapp secret show -g rg-owui-paas -n ca-owu
 
 ## Cost estimate
 
-Japan East, 730 hours per month, converted to JPY from the Azure Retail Prices API (retrieved on 2026-10-11). **These are estimates; the actual bill has not been verified.**
+Japan East, 730 hours per month, converted to JPY from the Azure Retail Prices API (retrieved on 2026-10-11). The actual bill (2026-10-11 to 15, five days) is compared after the table.
 
 | Item | Unit price | Monthly (approx.) |
 |---|---|---|
@@ -110,7 +110,8 @@ Japan East, 730 hours per month, converted to JPY from the Azure Retail Prices A
 | PostgreSQL storage, 32 GB | about 21.7 JPY/GB | about 700 JPY |
 | Private endpoints x 2 (Azure OpenAI, Blob) | about 1.58 JPY/hour each | about 2,300 JPY |
 | Private DNS zones x 3 | about 79 JPY/month each | about 240 JPY |
-| **Total** | | **about 9,900 to 18,000 JPY (about 330 to 600 JPY per day)** |
+| Container Apps environment infrastructure (Standard Load Balancer and a Standard static public IP) | LB about 3.94 JPY/hour, IP about 0.79 JPY/hour (derived from the actual bill) | about 3,450 JPY |
+| **Total** | | **about 13,400 to 21,500 JPY (about 440 to 710 JPY per day)** |
 
 Container Apps (Consumption) unit prices:
 
@@ -121,9 +122,18 @@ Container Apps (Consumption) unit prices:
 | Memory | about 0.0005 JPY/GiB-second |
 | Free grant (per subscription, per month) | 180,000 vCPU-seconds, 360,000 GiB-seconds |
 
-- The idle rate applies only when the replica is not processing requests, uses less than 0.01 vCPU, and receives less than 1,000 bytes per second. Whether Open WebUI is actually treated as idle needs to be measured.
+- The idle rate applies only when the replica is not processing requests, uses less than 0.01 vCPU, and receives less than 1,000 bytes per second. In this setup, the actual bill also showed the idle rate (see below).
 - Not included: Azure OpenAI token charges, Log Analytics (5 GB per month free; the daily cap is set to 1 GB), data transfer, and Blob capacity.
-- The environment management meter (`Environment Management`) applies when you use a Dedicated profile, a private endpoint on the environment itself, or planned maintenance. This sample uses none of them, so it should not apply (to be confirmed).
+- The environment management meter (`Environment Management`) applies when you use a Dedicated profile, a private endpoint on the environment itself, or planned maintenance. This sample uses none of them, and it does not appear on the bill.
+- Creating a Container Apps environment also creates a separate resource group that starts with `ME_`, containing a Standard Load Balancer (`capp-svc-lb`) and a Standard public IP (`capp-svc-lb-ip`). The first estimate did not include them; they were added after checking the actual bill.
+
+Actual bill (Cost Management, 2026-10-11 to 15, five days):
+
+- `rg-owui-paas` was 982 JPY and the `ME_` resource group was 431 JPY.
+- A full day (10/14) was about 439 JPY. That is about 13,400 JPY per month, almost the same as the low end of the estimate.
+- For Container Apps, only `Standard vCPU Idle Usage` and `Standard Memory Idle Usage` were billed. There was no `Active Usage` row.
+- The free grant ran out on 10/13. The whole of 10/14 was 86,400 vCPU-seconds and 172,800 GiB-seconds, all at the idle rate.
+- Only one person used it, lightly, so the active charge of heavier use is not in these numbers.
 
 ## Tuning for the idle rate
 
@@ -148,8 +158,8 @@ Average over 10 minutes with no access (1 replica, 1 vCPU / 2 GiB):
 | CPU | about 0.0057 vCPU | about 0.0017 vCPU |
 | Network receive | about 1,320 bytes/s | about 307 bytes/s |
 
-- On the metrics, all three conditions are met. Whether the replica is actually billed at the idle rate has to be confirmed in Cost Management (`Standard vCPU Idle Usage` versus `Active Usage`). That is still being verified.
-- Container Apps has a monthly free grant (180,000 vCPU-seconds and 360,000 GiB-seconds per subscription), and usage within the grant does not appear on the bill. The idle/active split can therefore only be seen after the grant is used up.
+- On the metrics, all three conditions are met. The actual bill also showed the idle rate (see the cost estimate above).
+- Container Apps has a monthly free grant (180,000 vCPU-seconds and 360,000 GiB-seconds per subscription), and usage within the grant does not appear on the bill.
 - I did not separate which of the two variables made the difference.
 - These are `ConfigVar` settings, so to apply them after the first start, deploy once with `--reset-config`.
 
@@ -184,7 +194,7 @@ Things I noticed:
 
 ## Not verified
 
-- Whether the actual bill uses the idle rate (`Standard vCPU Idle Usage` versus `Active Usage` in Cost Management).
+- The actual bill including active charges under heavier use (only one person used it, lightly).
 - Whether the `Standard_B1ms` connection limit (35 for users) is enough for several users (only one user was tested).
 - OCR (for example, PDFs that contain only images), large files, and using an Azure OpenAI embedding model.
 
